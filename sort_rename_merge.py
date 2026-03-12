@@ -1,0 +1,504 @@
+#!/usr/bin/env python3
+"""
+sort_rename_merge.py
+
+Audit-ready tool to read multiple Excel files, match PDFs, sort by Beneficial Owner (BO),
+rename, archive, and optionally merge PDFs.
+
+Requirements:
+- Python 3.9+
+- Libraries: openpyxl, PyPDF2
+- No runtime user interaction
+- Works on Windows and Linux
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import shutil
+import sys
+import traceback
+import unicodedata
+from collections import defaultdict
+from datetime import datetime, date
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+from openpyxl import load_workbook
+from PyPDF2 import PdfMerger, PdfReader, PdfWriter
+
+
+# =========================
+# Global Log Buffer
+# =========================
+
+LOG_BUFFER: List[str] = []
+
+
+def log(level: str, message: str) -> None:
+    """Append a log message to the in-memory log buffer."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    LOG_BUFFER.append(f"{timestamp} [{level}] {message}")
+
+
+# =========================
+# Default Settings
+# =========================
+
+DEFAULT_SETTINGS: Dict[str, Any] = {
+    "columns": {
+        "isin": "Financial Instrument",
+        "date": "Paymt. Date",
+        "bo": "BO Name",
+        "pdf_base": "Clearstream Request ID",
+    },
+    "actions": {
+        "merge": True,
+        "per_bo_merge": False,
+        "cleanup_input": False,
+        "move_pdfs": False,
+    },
+    "lookup": {
+        "strategies": ["exact"],
+        "case_insensitive": True,
+    },
+    "naming": {
+        "date_format": "%Y-%m-%d",
+    },
+    "sanitize_filenames": True,
+}
+
+
+# =========================
+# Settings Loader
+# =========================
+
+def strip_jsonc_comments(text: str) -> str:
+    """Remove // and /* */ comments from JSONC text."""
+    text = re.sub(r"//.*?$", "", text, flags=re.MULTILINE)
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+    return text
+
+
+def load_settings(base_dir: Path) -> Dict[str, Any]:
+    """Load settings.json or settings.jsonc, otherwise return defaults."""
+    json_file = base_dir / "settings.json"
+    jsonc_file = base_dir / "settings.jsonc"
+
+    if json_file.exists():
+        try:
+            with json_file.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            log("INFO", "Loaded settings.json")
+            return deep_merge(DEFAULT_SETTINGS, data)
+        except Exception as e:
+            log("ERROR", f"Failed to load settings.json: {e}")
+
+    if jsonc_file.exists():
+        try:
+            with jsonc_file.open("r", encoding="utf-8") as f:
+                raw = f.read()
+            stripped = strip_jsonc_comments(raw)
+            data = json.loads(stripped)
+            log("INFO", "Loaded settings.jsonc")
+            return deep_merge(DEFAULT_SETTINGS, data)
+        except Exception as e:
+            log("ERROR", f"Failed to load settings.jsonc: {e}")
+
+    log("INFO", "No settings file found. Using default settings.")
+    return DEFAULT_SETTINGS.copy()
+
+
+def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """Deep merge two dictionaries."""
+    result = dict(base)
+    for k, v in override.items():
+        if isinstance(v, dict) and k in result and isinstance(result[k], dict):
+            result[k] = deep_merge(result[k], v)
+        else:
+            result[k] = v
+    return result
+
+
+# =========================
+# Utility Functions
+# =========================
+
+INVALID_CHARS = r'[<>:"/\\|?*]'
+
+
+def sanitize_filename(name: str) -> str:
+    """Sanitize filename for Windows compatibility."""
+    name = unicodedata.normalize("NFKD", name)
+    name = re.sub(INVALID_CHARS, "_", name)
+    name = name.strip()
+    return name
+
+
+def ensure_unique_path(path: Path) -> Path:
+    """Ensure filename uniqueness by adding _1, _2 suffixes."""
+    if not path.exists():
+        return path
+
+    base = path.stem
+    ext = path.suffix
+    parent = path.parent
+
+    counter = 1
+    while True:
+        new_path = parent / f"{base}_{counter}{ext}"
+        if not new_path.exists():
+            return new_path
+        counter += 1
+
+
+def parse_excel_date(value: Any) -> Optional[date]:
+    """Parse Excel date value into a date."""
+    if isinstance(value, datetime):
+        return value.date()
+
+    if isinstance(value, date):
+        return value
+
+    if isinstance(value, str):
+        for fmt in ("%d.%m.%Y", "%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y"):
+            try:
+                return datetime.strptime(value.strip(), fmt).date()
+            except Exception:
+                continue
+
+    return None
+
+
+# =========================
+# Excel Processing
+# =========================
+
+def read_excel_files(excel_files: List[Path], settings: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Read all Excel files and extract relevant rows."""
+    columns = settings["columns"]
+
+    records: List[Dict[str, Any]] = []
+    total_rows = 0
+
+    for excel_file in excel_files:
+        try:
+            wb = load_workbook(excel_file, read_only=True, data_only=True)
+            ws = wb.active
+
+            header = [str(c.value).strip() if c.value else "" for c in next(ws.iter_rows(min_row=1, max_row=1))[0:]]
+
+            col_map = {name: idx for idx, name in enumerate(header)}
+
+            log("INFO", f"Processing Excel: {excel_file.name}")
+
+            file_rows = 0
+            valid_rows = 0
+
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                total_rows += 1
+                file_rows += 1
+
+                if not row:
+                    continue
+
+                first = str(row[0]) if row[0] else ""
+                if first.startswith("Query executed"):
+                    continue
+
+                def get_value(col_name: str) -> Any:
+                    idx = col_map.get(col_name)
+                    return row[idx] if idx is not None and idx < len(row) else None
+
+                isin = get_value(columns["isin"]) or "UNKNOWN_ISIN"
+                date_val = get_value(columns["date"])
+                bo = get_value(columns["bo"]) or "UNKNOWN_BO"
+                pdf_base = get_value(columns["pdf_base"])
+
+                if not pdf_base:
+                    log("WARNING", f"Skipping row: missing pdf_base in {excel_file.name}")
+                    continue
+
+                parsed_date = parse_excel_date(date_val)
+                if not parsed_date:
+                    log("WARNING", f"Skipping row: invalid date in {excel_file.name}")
+                    continue
+
+                record = {
+                    "isin": str(isin).strip(),
+                    "date": parsed_date,
+                    "bo": str(bo).strip(),
+                    "pdf_base": str(pdf_base).strip(),
+                }
+
+                records.append(record)
+                valid_rows += 1
+
+            log("INFO", f"{excel_file.name}: rows={file_rows}, valid={valid_rows}")
+
+        except Exception as e:
+            log("ERROR", f"Failed reading Excel {excel_file}: {e}")
+
+    log("INFO", f"Total rows processed: {total_rows}")
+    return records
+
+
+# =========================
+# PDF Lookup
+# =========================
+
+def find_pdf(pdf_base: str, pdf_dir: Path, case_insensitive: bool) -> List[Path]:
+    """Find matching PDFs in inbox."""
+    if not pdf_base.lower().endswith(".pdf"):
+        pdf_base += ".pdf"
+
+    matches: List[Path] = []
+
+    for f in pdf_dir.iterdir():
+        if not f.is_file():
+            continue
+
+        name = f.name
+        if case_insensitive:
+            if name.lower() == pdf_base.lower():
+                matches.append(f)
+        else:
+            if name == pdf_base:
+                matches.append(f)
+
+    return matches
+
+
+# =========================
+# PDF Merge
+# =========================
+
+def merge_pdfs_fast(pdf_paths: List[Path], output: Path, defective: List[str]) -> bool:
+    """Try fast merge using PdfMerger."""
+    try:
+        merger = PdfMerger()
+        for p in pdf_paths:
+            try:
+                merger.append(str(p))
+            except Exception:
+                defective.append(str(p))
+                log("WARNING", f"Defective PDF skipped: {p}")
+        merger.write(str(output))
+        merger.close()
+        return True
+    except Exception:
+        return False
+
+
+def merge_pdfs_fallback(pdf_paths: List[Path], output: Path, defective: List[str]) -> None:
+    """Fallback merge using PdfReader/PdfWriter."""
+    writer = PdfWriter()
+
+    for p in pdf_paths:
+        try:
+            reader = PdfReader(str(p))
+            for page in reader.pages:
+                writer.add_page(page)
+        except Exception:
+            defective.append(str(p))
+            log("WARNING", f"Defective PDF skipped (fallback): {p}")
+
+    with output.open("wb") as f:
+        writer.write(f)
+
+
+# =========================
+# Main Processing
+# =========================
+
+def process(base_dir: Path) -> None:
+    start_time = datetime.now()
+
+    run_id = start_time.strftime("%Y-%m-%d_%H-%M-%S")
+    log("INFO", f"Run started: {run_id}")
+
+    settings = load_settings(base_dir)
+
+    input_excel = base_dir / "input" / "excel"
+    input_pdf = base_dir / "input" / "pdf_inbox"
+
+    runs_dir = base_dir / "runs"
+    run_dir = runs_dir / run_id
+
+    snapshot_excel = run_dir / "input_snapshot" / "excel"
+    snapshot_pdf = run_dir / "input_snapshot" / "pdf_inbox"
+
+    sorted_dir = run_dir / "sorted_by_bo"
+    merged_dir = run_dir / "merged"
+
+    for p in [snapshot_excel, snapshot_pdf, sorted_dir, merged_dir]:
+        p.mkdir(parents=True, exist_ok=True)
+
+    # Discover files
+    excel_files = [f for f in input_excel.iterdir() if f.suffix.lower() in (".xlsx", ".xlsm")]
+    pdf_files = [f for f in input_pdf.iterdir() if f.suffix.lower() == ".pdf"]
+
+    log("INFO", f"Excel files found: {len(excel_files)}")
+    log("INFO", f"PDF files found: {len(pdf_files)}")
+
+    # Snapshot
+    for f in excel_files:
+        shutil.copy2(f, snapshot_excel / f.name)
+
+    for f in pdf_files:
+        shutil.copy2(f, snapshot_pdf / f.name)
+
+    # Read Excel
+    records = read_excel_files(excel_files, settings)
+
+    valid_records = 0
+    skipped_records = 0
+
+    missing_pdfs: List[str] = []
+    defective_pdfs: List[str] = []
+    output_files: List[str] = []
+
+    sorted_records: List[Tuple[str, date, str, Path]] = []
+
+    for rec in records:
+        matches = find_pdf(
+            rec["pdf_base"],
+            input_pdf,
+            settings["lookup"]["case_insensitive"],
+        )
+
+        if not matches:
+            missing_pdfs.append(rec["pdf_base"])
+            log("WARNING", f"Missing PDF for {rec['pdf_base']}")
+            skipped_records += 1
+            continue
+
+        if len(matches) > 1:
+            log("WARNING", f"Multiple PDFs found for {rec['pdf_base']}")
+            skipped_records += 1
+            continue
+
+        pdf_path = matches[0]
+
+        bo = sanitize_filename(rec["bo"]) if settings["sanitize_filenames"] else rec["bo"]
+        isin = sanitize_filename(rec["isin"]) if settings["sanitize_filenames"] else rec["isin"]
+
+        date_str = rec["date"].strftime(settings["naming"]["date_format"])
+
+        target_dir = sorted_dir / bo
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        target_name = f"{isin}_{date_str}.pdf"
+        target_path = ensure_unique_path(target_dir / target_name)
+
+        try:
+            if settings["actions"]["move_pdfs"]:
+                shutil.move(str(pdf_path), str(target_path))
+            else:
+                shutil.copy2(pdf_path, target_path)
+
+            log("INFO", f"Created {target_path}")
+            output_files.append(str(target_path))
+
+            sorted_records.append((bo, rec["date"], isin, target_path))
+            valid_records += 1
+
+        except Exception as e:
+            log("ERROR", f"Failed handling PDF {pdf_path}: {e}")
+            skipped_records += 1
+
+    # Merge
+    merge_outputs: List[str] = []
+
+    if settings["actions"]["merge"] and sorted_records:
+        sorted_records.sort(key=lambda x: (x[0].lower(), x[1], x[2].lower()))
+
+        all_paths = [r[3] for r in sorted_records]
+        merged_file = merged_dir / "merged_all.pdf"
+
+        if not merge_pdfs_fast(all_paths, merged_file, defective_pdfs):
+            merge_pdfs_fallback(all_paths, merged_file, defective_pdfs)
+
+        merge_outputs.append(str(merged_file))
+        log("INFO", f"Merged all PDFs -> {merged_file}")
+
+    if settings["actions"]["per_bo_merge"]:
+        per_bo: Dict[str, List[Path]] = defaultdict(list)
+        for bo, _, _, p in sorted_records:
+            per_bo[bo].append(p)
+
+        for bo, paths in per_bo.items():
+            merged_file = merged_dir / f"merged_{bo}.pdf"
+            if not merge_pdfs_fast(paths, merged_file, defective_pdfs):
+                merge_pdfs_fallback(paths, merged_file, defective_pdfs)
+
+            merge_outputs.append(str(merged_file))
+            log("INFO", f"Merged BO {bo} -> {merged_file}")
+
+    # Cleanup
+    if settings["actions"]["cleanup_input"]:
+        for f in input_excel.iterdir():
+            f.unlink()
+        for f in input_pdf.iterdir():
+            f.unlink()
+        log("INFO", "Input cleanup completed")
+
+    # Manifest
+    end_time = datetime.now()
+
+    manifest = {
+        "run_id": run_id,
+        "start_time": start_time.isoformat(),
+        "end_time": end_time.isoformat(),
+        "excel_files": [f.name for f in excel_files],
+        "pdf_input_snapshot": [f.name for f in pdf_files],
+        "total_rows": len(records),
+        "valid_records": valid_records,
+        "skipped_records": skipped_records,
+        "missing_pdfs": missing_pdfs,
+        "defective_pdfs": defective_pdfs,
+        "output_files": output_files,
+        "merge_outputs": merge_outputs,
+        "settings": settings,
+    }
+
+    try:
+        with (run_dir / "manifest.json").open("w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+    except Exception as e:
+        log("ERROR", f"Failed writing manifest: {e}")
+
+    # Write log
+    try:
+        with (run_dir / "log.txt").open("w", encoding="utf-8") as f:
+            f.write("\n".join(LOG_BUFFER))
+    except Exception:
+        pass
+
+    log("INFO", f"Run finished: {run_id}")
+
+
+# =========================
+# Entry Point
+# =========================
+
+def main() -> None:
+    """Main entry point."""
+    try:
+        base_dir = Path(__file__).resolve().parent
+        process(base_dir)
+    except Exception:
+        LOG_BUFFER.append("FATAL ERROR")
+        LOG_BUFFER.append(traceback.format_exc())
+        try:
+            fallback_log = Path("fatal_log.txt")
+            with fallback_log.open("w", encoding="utf-8") as f:
+                f.write("\n".join(LOG_BUFFER))
+        except Exception:
+            pass
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
