@@ -1,0 +1,26 @@
+{
+  "columns": {
+    "isin": "Financial Instrument",
+    "date": "Paymt. Date",
+    "bo": "BO Name",
+    "pdf_base": "Clearstream Request ID"
+  },
+
+  "actions": {
+    "merge": true,
+    "per_bo_merge": false,
+    "cleanup_input": true,
+    "move_pdfs": true
+  },
+
+  "lookup": {
+    "strategies": ["exact"],
+    "case_insensitive": true
+  },
+
+  "naming": {
+    "date_format": "%Y-%m-%d"
+  },
+
+  "sanitize_filenames": true
+}
