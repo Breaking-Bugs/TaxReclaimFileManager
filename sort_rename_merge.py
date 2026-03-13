@@ -237,6 +237,8 @@ def read_excel_files(excel_files: List[Path], settings: Dict[str, Any]) -> List[
 
             log("INFO", f"{excel_file.name}: rows={file_rows}, valid={valid_rows}")
 
+            wb.close()
+
         except Exception as e:
             log("ERROR", f"Failed reading Excel {excel_file}: {e}")
 
@@ -335,21 +337,18 @@ def process(base_dir: Path) -> None:
     for p in [snapshot_excel, snapshot_pdf, sorted_dir, merged_dir]:
         p.mkdir(parents=True, exist_ok=True)
 
-    # Discover files
     excel_files = [f for f in input_excel.iterdir() if f.suffix.lower() in (".xlsx", ".xlsm")]
     pdf_files = [f for f in input_pdf.iterdir() if f.suffix.lower() == ".pdf"]
 
     log("INFO", f"Excel files found: {len(excel_files)}")
     log("INFO", f"PDF files found: {len(pdf_files)}")
 
-    # Snapshot
     for f in excel_files:
         shutil.copy2(f, snapshot_excel / f.name)
 
     for f in pdf_files:
         shutil.copy2(f, snapshot_pdf / f.name)
 
-    # Read Excel
     records = read_excel_files(excel_files, settings)
 
     valid_records = 0
@@ -408,7 +407,6 @@ def process(base_dir: Path) -> None:
             log("ERROR", f"Failed handling PDF {pdf_path}: {e}")
             skipped_records += 1
 
-    # Merge
     merge_outputs: List[str] = []
 
     if settings["actions"]["merge"] and sorted_records:
@@ -436,15 +434,21 @@ def process(base_dir: Path) -> None:
             merge_outputs.append(str(merged_file))
             log("INFO", f"Merged BO {bo} -> {merged_file}")
 
-    # Cleanup
     if settings["actions"]["cleanup_input"]:
-        for f in input_excel.iterdir():
-            f.unlink()
-        for f in input_pdf.iterdir():
-            f.unlink()
+        for f in list(input_excel.iterdir()):
+            try:
+                f.unlink()
+            except Exception as e:
+                log("WARNING", f"Could not delete Excel {f}: {e}")
+
+        for f in list(input_pdf.iterdir()):
+            try:
+                f.unlink()
+            except Exception as e:
+                log("WARNING", f"Could not delete PDF {f}: {e}")
+
         log("INFO", "Input cleanup completed")
 
-    # Manifest
     end_time = datetime.now()
 
     manifest = {
@@ -469,7 +473,6 @@ def process(base_dir: Path) -> None:
     except Exception as e:
         log("ERROR", f"Failed writing manifest: {e}")
 
-    # Write log
     try:
         with (run_dir / "log.txt").open("w", encoding="utf-8") as f:
             f.write("\n".join(LOG_BUFFER))
