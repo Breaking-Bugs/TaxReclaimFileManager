@@ -46,6 +46,7 @@ TaxReclaimFileManager/
 5. Excel rows are matched to PDFs using the configured `pdf_base` column.
 6. Depending on `settings.json`, PDFs are copied, renamed, sorted, and merged.
 7. A `manifest.json` and `log.txt` are written into the run folder.
+8. A compact run summary is printed in the shell at the end.
 
 The script always works from the snapshot after the initial input copy. This keeps runs deterministic and audit-ready.
 
@@ -208,19 +209,34 @@ Inside it you will typically find:
 - `merged/`
 - `manifest.json`
 - `log.txt`
+- `warnings.txt` if unprocessed inbox PDFs remain
 
 ## Manifest
 
 The manifest contains:
 - run ID
+- final status
 - start and end time
+- duration in seconds
 - input snapshots
 - processed row counts
 - missing PDFs
 - defective PDFs
+- unprocessed inbox PDFs
 - created output files
 - created merged files
 - effective settings
+
+## Shell Summary
+
+At the end of each run the script prints a short summary to the shell, including:
+- final status: `SUCCESS` or `SUCCESS WITH WARNINGS`
+- Excel and PDF file counts
+- processed, valid, and skipped record counts
+- missing, defective, and unprocessed PDF counts
+- created output and merge file counts
+- run folder path
+- total duration
 
 ## Notes
 

@@ -225,6 +225,53 @@ def run_with_retries(
     raise last_error
 
 
+def determine_run_status(
+    skipped_records: int,
+    missing_pdfs: List[str],
+    defective_pdfs: List[str],
+    unprocessed_input_pdfs: List[str],
+) -> str:
+    """Determine the final run status for manifest and shell output."""
+    if skipped_records == 0 and not missing_pdfs and not defective_pdfs and not unprocessed_input_pdfs:
+        return "SUCCESS"
+    return "SUCCESS WITH WARNINGS"
+
+
+def print_run_summary(
+    run_id: str,
+    status: str,
+    excel_count: int,
+    pdf_count: int,
+    total_rows: int,
+    valid_records: int,
+    skipped_records: int,
+    missing_pdfs: List[str],
+    defective_pdfs: List[str],
+    unprocessed_input_pdfs: List[str],
+    output_files: List[str],
+    merge_outputs: List[str],
+    run_dir: Path,
+    duration_seconds: float,
+) -> None:
+    """Print a compact run summary to the shell."""
+    print()
+    print(f"Run finished: {run_id}")
+    print(f"Status: {status}")
+    print()
+    print(f"Excel files: {excel_count}")
+    print(f"PDF files: {pdf_count}")
+    print(f"Rows processed: {total_rows}")
+    print(f"Valid records: {valid_records}")
+    print(f"Skipped records: {skipped_records}")
+    print(f"Missing PDFs: {len(missing_pdfs)}")
+    print(f"Defective PDFs: {len(defective_pdfs)}")
+    print(f"Unprocessed inbox PDFs: {len(unprocessed_input_pdfs)}")
+    print(f"Output files created: {len(output_files)}")
+    print(f"Merge files created: {len(merge_outputs)}")
+    print(f"Run folder: {run_dir}")
+    print(f"Duration: {duration_seconds:.2f}s")
+
+
 def ensure_unique_path(path: Path) -> Path:
     """Ensure filename uniqueness by adding _1, _2 suffixes."""
     if not path.exists():
@@ -673,11 +720,20 @@ def process(base_dir: Path) -> None:
         )
 
     end_time = datetime.now()
+    duration_seconds = (end_time - start_time).total_seconds()
+    run_status = determine_run_status(
+        skipped_records,
+        missing_pdfs,
+        defective_pdfs,
+        unprocessed_input_pdfs,
+    )
 
     manifest = {
         "run_id": run_id,
+        "status": run_status,
         "start_time": start_time.isoformat(),
         "end_time": end_time.isoformat(),
+        "duration_seconds": duration_seconds,
         "excel_files": [f.name for f in excel_files],
         "pdf_input_snapshot": [f.name for f in pdf_files],
         "total_rows": total_rows,
@@ -714,6 +770,22 @@ def process(base_dir: Path) -> None:
             pass
 
     log("INFO", f"Run finished: {run_id}")
+    print_run_summary(
+        run_id=run_id,
+        status=run_status,
+        excel_count=len(excel_files),
+        pdf_count=len(pdf_files),
+        total_rows=total_rows,
+        valid_records=valid_records,
+        skipped_records=skipped_records,
+        missing_pdfs=missing_pdfs,
+        defective_pdfs=defective_pdfs,
+        unprocessed_input_pdfs=unprocessed_input_pdfs,
+        output_files=output_files,
+        merge_outputs=merge_outputs,
+        run_dir=run_dir,
+        duration_seconds=duration_seconds,
+    )
 
 
 # =========================
