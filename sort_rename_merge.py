@@ -249,30 +249,29 @@ def read_excel_files(
     return records, total_rows
 
 
-# =========================
-# PDF Lookup
-# =========================
+def build_pdf_index(pdf_files: List[Path], case_insensitive: bool) -> Dict[str, List[Path]]:
+    """Build a one-time PDF lookup index for faster record matching."""
+    index: Dict[str, List[Path]] = defaultdict(list)
 
-def find_pdf(pdf_base: str, pdf_files: List[Path], case_insensitive: bool) -> List[Path]:
-    """Find matching PDFs in inbox."""
+    for pdf_file in pdf_files:
+        if not pdf_file.is_file():
+            continue
+
+        key = pdf_file.name.lower() if case_insensitive else pdf_file.name
+        index[key].append(pdf_file)
+
+    return dict(index)
+
+
+def find_pdf_indexed(
+    pdf_base: str, pdf_index: Dict[str, List[Path]], case_insensitive: bool
+) -> List[Path]:
+    """Find matching PDFs using the prebuilt index."""
     if not pdf_base.lower().endswith(".pdf"):
         pdf_base += ".pdf"
 
-    matches: List[Path] = []
-
-    for f in pdf_files:
-        if not f.is_file():
-            continue
-
-        name = f.name
-        if case_insensitive:
-            if name.lower() == pdf_base.lower():
-                matches.append(f)
-        else:
-            if name == pdf_base:
-                matches.append(f)
-
-    return matches
+    key = pdf_base.lower() if case_insensitive else pdf_base
+    return list(pdf_index.get(key, []))
 
 
 # =========================
@@ -366,6 +365,7 @@ def process(base_dir: Path) -> None:
         shutil.copy2(f, snapshot_pdf / f.name)
 
     records, total_rows = read_excel_files(excel_files, settings)
+    pdf_index = build_pdf_index(pdf_files, settings["lookup"]["case_insensitive"])
 
     valid_records = 0
     skipped_records = 0
@@ -379,9 +379,9 @@ def process(base_dir: Path) -> None:
     sorted_records: List[Tuple[str, date, str, Path]] = []
 
     for rec in records:
-        matches = find_pdf(
+        matches = find_pdf_indexed(
             rec["pdf_base"],
-            pdf_files,
+            pdf_index,
             settings["lookup"]["case_insensitive"],
         )
 
