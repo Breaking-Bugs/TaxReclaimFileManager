@@ -21,6 +21,7 @@ import sys
 import traceback
 import unicodedata
 from collections import defaultdict
+from copy import deepcopy
 from datetime import datetime, date
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -107,7 +108,7 @@ def load_settings(base_dir: Path) -> Dict[str, Any]:
             log("ERROR", f"Failed to load settings.jsonc: {e}")
 
     log("INFO", "No settings file found. Using default settings.")
-    return DEFAULT_SETTINGS.copy()
+    return deepcopy(DEFAULT_SETTINGS)
 
 
 def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
@@ -175,7 +176,9 @@ def parse_excel_date(value: Any) -> Optional[date]:
 # Excel Processing
 # =========================
 
-def read_excel_files(excel_files: List[Path], settings: Dict[str, Any]) -> List[Dict[str, Any]]:
+def read_excel_files(
+    excel_files: List[Path], settings: Dict[str, Any]
+) -> Tuple[List[Dict[str, Any]], int]:
     """Read all Excel files and extract relevant rows."""
     columns = settings["columns"]
 
@@ -243,21 +246,21 @@ def read_excel_files(excel_files: List[Path], settings: Dict[str, Any]) -> List[
             log("ERROR", f"Failed reading Excel {excel_file}: {e}")
 
     log("INFO", f"Total rows processed: {total_rows}")
-    return records
+    return records, total_rows
 
 
 # =========================
 # PDF Lookup
 # =========================
 
-def find_pdf(pdf_base: str, pdf_dir: Path, case_insensitive: bool) -> List[Path]:
+def find_pdf(pdf_base: str, pdf_files: List[Path], case_insensitive: bool) -> List[Path]:
     """Find matching PDFs in inbox."""
     if not pdf_base.lower().endswith(".pdf"):
         pdf_base += ".pdf"
 
     matches: List[Path] = []
 
-    for f in pdf_dir.iterdir():
+    for f in pdf_files:
         if not f.is_file():
             continue
 
@@ -276,38 +279,51 @@ def find_pdf(pdf_base: str, pdf_dir: Path, case_insensitive: bool) -> List[Path]
 # PDF Merge
 # =========================
 
-def merge_pdfs_fast(pdf_paths: List[Path], output: Path, defective: List[str]) -> bool:
+def merge_pdfs_fast(pdf_paths: List[Path], output: Path, defective: List[str]) -> Tuple[bool, int]:
     """Try fast merge using PdfMerger."""
     try:
         merger = PdfMerger()
+        appended = 0
         for p in pdf_paths:
             try:
                 merger.append(str(p))
+                appended += 1
             except Exception:
                 defective.append(str(p))
                 log("WARNING", f"Defective PDF skipped: {p}")
+
+        if appended == 0:
+            merger.close()
+            return True, 0
+
         merger.write(str(output))
         merger.close()
-        return True
+        return True, appended
     except Exception:
-        return False
+        return False, 0
 
 
-def merge_pdfs_fallback(pdf_paths: List[Path], output: Path, defective: List[str]) -> None:
+def merge_pdfs_fallback(pdf_paths: List[Path], output: Path, defective: List[str]) -> int:
     """Fallback merge using PdfReader/PdfWriter."""
     writer = PdfWriter()
+    pages_added = 0
 
     for p in pdf_paths:
         try:
             reader = PdfReader(str(p))
             for page in reader.pages:
                 writer.add_page(page)
+                pages_added += 1
         except Exception:
             defective.append(str(p))
             log("WARNING", f"Defective PDF skipped (fallback): {p}")
 
+    if pages_added == 0:
+        return 0
+
     with output.open("wb") as f:
         writer.write(f)
+    return pages_added
 
 
 # =========================
@@ -349,7 +365,7 @@ def process(base_dir: Path) -> None:
     for f in pdf_files:
         shutil.copy2(f, snapshot_pdf / f.name)
 
-    records = read_excel_files(excel_files, settings)
+    records, total_rows = read_excel_files(excel_files, settings)
 
     valid_records = 0
     skipped_records = 0
@@ -357,13 +373,15 @@ def process(base_dir: Path) -> None:
     missing_pdfs: List[str] = []
     defective_pdfs: List[str] = []
     output_files: List[str] = []
+    consumed_excel_files: set[Path] = set(excel_files)
+    consumed_pdf_files: set[Path] = set()
 
     sorted_records: List[Tuple[str, date, str, Path]] = []
 
     for rec in records:
         matches = find_pdf(
             rec["pdf_base"],
-            input_pdf,
+            pdf_files,
             settings["lookup"]["case_insensitive"],
         )
 
@@ -392,16 +410,19 @@ def process(base_dir: Path) -> None:
         target_path = ensure_unique_path(target_dir / target_name)
 
         try:
+            source_path = pdf_path
             if settings["actions"]["move_pdfs"]:
-                shutil.move(str(pdf_path), str(target_path))
+                source_path = snapshot_pdf / pdf_path.name
+                shutil.copy2(source_path, target_path)
             else:
-                shutil.copy2(pdf_path, target_path)
+                shutil.copy2(source_path, target_path)
 
             log("INFO", f"Created {target_path}")
             output_files.append(str(target_path))
 
             sorted_records.append((bo, rec["date"], isin, target_path))
             valid_records += 1
+            consumed_pdf_files.add(pdf_path)
 
         except Exception as e:
             log("ERROR", f"Failed handling PDF {pdf_path}: {e}")
@@ -415,11 +436,15 @@ def process(base_dir: Path) -> None:
         all_paths = [r[3] for r in sorted_records]
         merged_file = merged_dir / "merged_all.pdf"
 
-        if not merge_pdfs_fast(all_paths, merged_file, defective_pdfs):
-            merge_pdfs_fallback(all_paths, merged_file, defective_pdfs)
+        fast_ok, merged_count = merge_pdfs_fast(all_paths, merged_file, defective_pdfs)
+        if not fast_ok:
+            merged_count = merge_pdfs_fallback(all_paths, merged_file, defective_pdfs)
 
-        merge_outputs.append(str(merged_file))
-        log("INFO", f"Merged all PDFs -> {merged_file}")
+        if merged_count > 0:
+            merge_outputs.append(str(merged_file))
+            log("INFO", f"Merged all PDFs -> {merged_file}")
+        else:
+            log("WARNING", "Merged all PDFs skipped: no valid PDF content available")
 
     if settings["actions"]["per_bo_merge"]:
         per_bo: Dict[str, List[Path]] = defaultdict(list)
@@ -428,20 +453,24 @@ def process(base_dir: Path) -> None:
 
         for bo, paths in per_bo.items():
             merged_file = merged_dir / f"merged_{bo}.pdf"
-            if not merge_pdfs_fast(paths, merged_file, defective_pdfs):
-                merge_pdfs_fallback(paths, merged_file, defective_pdfs)
+            fast_ok, merged_count = merge_pdfs_fast(paths, merged_file, defective_pdfs)
+            if not fast_ok:
+                merged_count = merge_pdfs_fallback(paths, merged_file, defective_pdfs)
 
-            merge_outputs.append(str(merged_file))
-            log("INFO", f"Merged BO {bo} -> {merged_file}")
+            if merged_count > 0:
+                merge_outputs.append(str(merged_file))
+                log("INFO", f"Merged BO {bo} -> {merged_file}")
+            else:
+                log("WARNING", f"Merged BO {bo} skipped: no valid PDF content available")
 
     if settings["actions"]["cleanup_input"]:
-        for f in list(input_excel.iterdir()):
+        for f in consumed_excel_files:
             try:
                 f.unlink()
             except Exception as e:
                 log("WARNING", f"Could not delete Excel {f}: {e}")
 
-        for f in list(input_pdf.iterdir()):
+        for f in consumed_pdf_files:
             try:
                 f.unlink()
             except Exception as e:
@@ -457,7 +486,7 @@ def process(base_dir: Path) -> None:
         "end_time": end_time.isoformat(),
         "excel_files": [f.name for f in excel_files],
         "pdf_input_snapshot": [f.name for f in pdf_files],
-        "total_rows": len(records),
+        "total_rows": total_rows,
         "valid_records": valid_records,
         "skipped_records": skipped_records,
         "missing_pdfs": missing_pdfs,
