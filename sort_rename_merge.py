@@ -58,7 +58,6 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
         "merge": True,
         "per_bo_merge": False,
         "cleanup_input": False,
-        "move_pdfs": False,
     },
     "lookup": {
         "strategies": ["exact"],
@@ -91,6 +90,8 @@ def load_settings(base_dir: Path) -> Dict[str, Any]:
         try:
             with json_file.open("r", encoding="utf-8") as f:
                 data = json.load(f)
+            if isinstance(data.get("actions"), dict):
+                data["actions"].pop("move_pdfs", None)
             log("INFO", "Loaded settings.json")
             return deep_merge(DEFAULT_SETTINGS, data)
         except Exception as e:
@@ -102,6 +103,8 @@ def load_settings(base_dir: Path) -> Dict[str, Any]:
                 raw = f.read()
             stripped = strip_jsonc_comments(raw)
             data = json.loads(stripped)
+            if isinstance(data.get("actions"), dict):
+                data["actions"].pop("move_pdfs", None)
             log("INFO", "Loaded settings.jsonc")
             return deep_merge(DEFAULT_SETTINGS, data)
         except Exception as e:
@@ -410,12 +413,8 @@ def process(base_dir: Path) -> None:
         target_path = ensure_unique_path(target_dir / target_name)
 
         try:
-            source_path = pdf_path
-            if settings["actions"]["move_pdfs"]:
-                source_path = snapshot_pdf / pdf_path.name
-                shutil.copy2(source_path, target_path)
-            else:
-                shutil.copy2(source_path, target_path)
+            source_path = snapshot_pdf / pdf_path.name
+            shutil.copy2(source_path, target_path)
 
             log("INFO", f"Created {target_path}")
             output_files.append(str(target_path))

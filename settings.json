@@ -9,8 +9,7 @@
   "actions": {
     "merge": true,
     "per_bo_merge": false,
-    "cleanup_input": true,
-    "move_pdfs": true
+    "cleanup_input": true
   },
 
   "lookup": {
