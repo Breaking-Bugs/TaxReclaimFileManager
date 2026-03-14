@@ -665,6 +665,13 @@ def process(base_dir: Path) -> None:
 
         log("INFO", "Input cleanup completed")
 
+    unprocessed_input_pdfs = sorted(f.name for f in pdf_files if f not in consumed_pdf_files)
+    if unprocessed_input_pdfs:
+        log(
+            "WARNING",
+            "Unprocessed PDFs remain in input: " + ", ".join(unprocessed_input_pdfs),
+        )
+
     end_time = datetime.now()
 
     manifest = {
@@ -678,6 +685,8 @@ def process(base_dir: Path) -> None:
         "skipped_records": skipped_records,
         "missing_pdfs": missing_pdfs,
         "defective_pdfs": defective_pdfs,
+        "unprocessed_input_pdf_count": len(unprocessed_input_pdfs),
+        "unprocessed_input_pdfs": unprocessed_input_pdfs,
         "output_files": output_files,
         "merge_outputs": merge_outputs,
         "settings": settings,
@@ -694,6 +703,15 @@ def process(base_dir: Path) -> None:
             f.write("\n".join(LOG_BUFFER))
     except Exception:
         pass
+
+    if unprocessed_input_pdfs:
+        try:
+            with (run_dir / "warnings.txt").open("w", encoding="utf-8") as f:
+                f.write("Unprocessed PDFs remain in input:\n")
+                f.write("\n".join(unprocessed_input_pdfs))
+                f.write("\n")
+        except Exception:
+            pass
 
     log("INFO", f"Run finished: {run_id}")
 
