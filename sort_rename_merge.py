@@ -18,6 +18,7 @@ import json
 import re
 import shutil
 import sys
+import time
 import traceback
 import unicodedata
 from collections import defaultdict
@@ -65,6 +66,17 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "lookup": {
         "strategies": ["exact"],
         "case_insensitive": True,
+    },
+    "runtime": {
+        "mode": "normal",
+        "normal": {
+            "retries": 1,
+            "delay_ms": 0,
+        },
+        "robust": {
+            "retries": 5,
+            "delay_ms": 250,
+        },
     },
     "naming": {
         "date_format": "%Y-%m-%d",
@@ -172,6 +184,47 @@ def render_template(template: str, values: Dict[str, str], sanitize: bool) -> st
     return sanitize_filename(rendered) if sanitize else rendered.strip()
 
 
+def get_runtime_options(settings: Dict[str, Any]) -> Dict[str, Any]:
+    """Resolve runtime behavior from the selected mode."""
+    runtime = settings["runtime"]
+    mode = runtime.get("mode", "normal")
+    selected = runtime.get(mode, runtime["normal"])
+    return {
+        "mode": mode,
+        "retries": max(1, int(selected.get("retries", 1))),
+        "delay_ms": max(0, int(selected.get("delay_ms", 0))),
+    }
+
+
+def run_with_retries(
+    operation_name: str,
+    func: Any,
+    runtime_options: Dict[str, Any],
+) -> Any:
+    """Run a file operation with optional retries for slower/locked drives."""
+    attempts = runtime_options["retries"]
+    delay_seconds = runtime_options["delay_ms"] / 1000.0
+    last_error: Optional[Exception] = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return func()
+        except Exception as exc:
+            last_error = exc
+            if attempt >= attempts:
+                break
+
+            log(
+                "WARNING",
+                f"{operation_name} failed (attempt {attempt}/{attempts}): {exc}. Retrying...",
+            )
+            if delay_seconds > 0:
+                time.sleep(delay_seconds)
+
+    assert last_error is not None
+    raise last_error
+
+
 def ensure_unique_path(path: Path) -> Path:
     """Ensure filename uniqueness by adding _1, _2 suffixes."""
     if not path.exists():
@@ -212,7 +265,7 @@ def parse_excel_date(value: Any) -> Optional[date]:
 # =========================
 
 def read_excel_files(
-    excel_files: List[Path], settings: Dict[str, Any]
+    excel_files: List[Path], settings: Dict[str, Any], runtime_options: Dict[str, Any]
 ) -> Tuple[List[Dict[str, Any]], int]:
     """Read all Excel files and extract relevant rows."""
     columns = settings["columns"]
@@ -228,7 +281,11 @@ def read_excel_files(
 
     for excel_file in excel_files:
         try:
-            wb = load_workbook(excel_file, read_only=True, data_only=True)
+            wb = run_with_retries(
+                f"Open Excel workbook {excel_file.name}",
+                lambda path=excel_file: load_workbook(path, read_only=True, data_only=True),
+                runtime_options,
+            )
             ws = wb.active
 
             header = [str(c.value).strip() if c.value else "" for c in next(ws.iter_rows(min_row=1, max_row=1))[0:]]
@@ -328,7 +385,12 @@ def find_pdf_indexed(
 # PDF Merge
 # =========================
 
-def merge_pdfs_fast(pdf_paths: List[Path], output: Path, defective: List[str]) -> Tuple[bool, int]:
+def merge_pdfs_fast(
+    pdf_paths: List[Path],
+    output: Path,
+    defective: List[str],
+    runtime_options: Dict[str, Any],
+) -> Tuple[bool, int]:
     """Try fast merge using PdfMerger."""
     try:
         merger = PdfMerger()
@@ -345,14 +407,23 @@ def merge_pdfs_fast(pdf_paths: List[Path], output: Path, defective: List[str]) -
             merger.close()
             return True, 0
 
-        merger.write(str(output))
+        run_with_retries(
+            f"Write merged PDF {output.name}",
+            lambda: merger.write(str(output)),
+            runtime_options,
+        )
         merger.close()
         return True, appended
     except Exception:
         return False, 0
 
 
-def merge_pdfs_fallback(pdf_paths: List[Path], output: Path, defective: List[str]) -> int:
+def merge_pdfs_fallback(
+    pdf_paths: List[Path],
+    output: Path,
+    defective: List[str],
+    runtime_options: Dict[str, Any],
+) -> int:
     """Fallback merge using PdfReader/PdfWriter."""
     writer = PdfWriter()
     pages_added = 0
@@ -370,8 +441,15 @@ def merge_pdfs_fallback(pdf_paths: List[Path], output: Path, defective: List[str
     if pages_added == 0:
         return 0
 
-    with output.open("wb") as f:
-        writer.write(f)
+    def write_output() -> None:
+        with output.open("wb") as f:
+            writer.write(f)
+
+    run_with_retries(
+        f"Write merged PDF {output.name}",
+        write_output,
+        runtime_options,
+    )
     return pages_added
 
 
@@ -390,6 +468,9 @@ def process(base_dir: Path) -> None:
     naming = settings["naming"]
     paths_cfg = settings["paths"]
     sanitize_names = settings["sanitize_filenames"]
+    runtime_options = get_runtime_options(settings)
+
+    log("INFO", f"Runtime mode: {runtime_options['mode']}")
 
     input_excel = base_dir / Path(paths_cfg["excel_input"])
     input_pdf = base_dir / Path(paths_cfg["pdf_input"])
@@ -413,12 +494,20 @@ def process(base_dir: Path) -> None:
     log("INFO", f"PDF files found: {len(pdf_files)}")
 
     for f in excel_files:
-        shutil.copy2(f, snapshot_excel / f.name)
+        run_with_retries(
+            f"Snapshot Excel copy for {f.name}",
+            lambda src=f, dst=snapshot_excel / f.name: shutil.copy2(src, dst),
+            runtime_options,
+        )
 
     for f in pdf_files:
-        shutil.copy2(f, snapshot_pdf / f.name)
+        run_with_retries(
+            f"Snapshot PDF copy for {f.name}",
+            lambda src=f, dst=snapshot_pdf / f.name: shutil.copy2(src, dst),
+            runtime_options,
+        )
 
-    records, total_rows = read_excel_files(excel_files, settings)
+    records, total_rows = read_excel_files(excel_files, settings, runtime_options)
     pdf_index = build_pdf_index(pdf_files, settings["lookup"]["case_insensitive"])
 
     valid_records = 0
@@ -487,7 +576,11 @@ def process(base_dir: Path) -> None:
         try:
             source_path = snapshot_pdf / pdf_path.name
             if actions["create_outputs"]:
-                shutil.copy2(source_path, target_path)
+                run_with_retries(
+                    f"Output PDF copy for {pdf_path.name}",
+                    lambda src=source_path, dst=target_path: shutil.copy2(src, dst),
+                    runtime_options,
+                )
 
                 log("INFO", f"Created {target_path}")
                 output_files.append(str(target_path))
@@ -514,9 +607,9 @@ def process(base_dir: Path) -> None:
         all_paths = [r[3] for r in sorted_records]
         merged_file = merged_dir / naming["merged_all_filename"]
 
-        fast_ok, merged_count = merge_pdfs_fast(all_paths, merged_file, defective_pdfs)
+        fast_ok, merged_count = merge_pdfs_fast(all_paths, merged_file, defective_pdfs, runtime_options)
         if not fast_ok:
-            merged_count = merge_pdfs_fallback(all_paths, merged_file, defective_pdfs)
+            merged_count = merge_pdfs_fallback(all_paths, merged_file, defective_pdfs, runtime_options)
 
         if merged_count > 0:
             merge_outputs.append(str(merged_file))
@@ -539,9 +632,9 @@ def process(base_dir: Path) -> None:
                 merged_name += ".pdf"
 
             merged_file = merged_dir / merged_name
-            fast_ok, merged_count = merge_pdfs_fast(paths, merged_file, defective_pdfs)
+            fast_ok, merged_count = merge_pdfs_fast(paths, merged_file, defective_pdfs, runtime_options)
             if not fast_ok:
-                merged_count = merge_pdfs_fallback(paths, merged_file, defective_pdfs)
+                merged_count = merge_pdfs_fallback(paths, merged_file, defective_pdfs, runtime_options)
 
             if merged_count > 0:
                 merge_outputs.append(str(merged_file))
@@ -552,13 +645,21 @@ def process(base_dir: Path) -> None:
     if actions["cleanup_input"]:
         for f in consumed_excel_files:
             try:
-                f.unlink()
+                run_with_retries(
+                    f"Delete Excel input {f.name}",
+                    lambda path=f: path.unlink(),
+                    runtime_options,
+                )
             except Exception as e:
                 log("WARNING", f"Could not delete Excel {f}: {e}")
 
         for f in consumed_pdf_files:
             try:
-                f.unlink()
+                run_with_retries(
+                    f"Delete PDF input {f.name}",
+                    lambda path=f: path.unlink(),
+                    runtime_options,
+                )
             except Exception as e:
                 log("WARNING", f"Could not delete PDF {f}: {e}")
 

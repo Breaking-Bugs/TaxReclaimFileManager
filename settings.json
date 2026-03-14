@@ -20,6 +20,18 @@
     "case_insensitive": true
   },
 
+  "runtime": {
+    "mode": "normal",
+    "normal": {
+      "retries": 1,
+      "delay_ms": 0
+    },
+    "robust": {
+      "retries": 5,
+      "delay_ms": 250
+    }
+  },
+
   "naming": {
     "date_format": "%Y-%m-%d",
     "output_filename_pattern": "{date}_{isin}.pdf",
