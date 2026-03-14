@@ -7,7 +7,10 @@
   },
 
   "actions": {
-    "merge": true,
+    "create_outputs": true,
+    "sort_into_bo_folders": true,
+    "rename_pdfs": true,
+    "merge_all": true,
     "per_bo_merge": false,
     "cleanup_input": true
   },
@@ -18,7 +21,21 @@
   },
 
   "naming": {
-    "date_format": "%Y-%m-%d"
+    "date_format": "%Y-%m-%d",
+    "output_filename_pattern": "{date}_{isin}.pdf",
+    "bo_folder_pattern": "{bo}",
+    "merged_all_filename": "merged_all.pdf",
+    "merged_bo_filename_pattern": "merged_{bo}.pdf"
+  },
+
+  "paths": {
+    "excel_input": "input/excel",
+    "pdf_input": "input/pdf_inbox",
+    "runs": "runs",
+    "snapshot_excel": "input_snapshot/excel",
+    "snapshot_pdf": "input_snapshot/pdf_inbox",
+    "individual_output": "sorted_by_bo",
+    "merged_output": "merged"
   },
 
   "sanitize_filenames": true

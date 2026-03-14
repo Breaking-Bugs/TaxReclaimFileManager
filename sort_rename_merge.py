@@ -55,7 +55,10 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
         "pdf_base": "Clearstream Request ID",
     },
     "actions": {
-        "merge": True,
+        "create_outputs": True,
+        "sort_into_bo_folders": True,
+        "rename_pdfs": True,
+        "merge_all": True,
         "per_bo_merge": False,
         "cleanup_input": False,
     },
@@ -65,6 +68,19 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     },
     "naming": {
         "date_format": "%Y-%m-%d",
+        "output_filename_pattern": "{isin}_{date}.pdf",
+        "bo_folder_pattern": "{bo}",
+        "merged_all_filename": "merged_all.pdf",
+        "merged_bo_filename_pattern": "merged_{bo}.pdf",
+    },
+    "paths": {
+        "excel_input": "input/excel",
+        "pdf_input": "input/pdf_inbox",
+        "runs": "runs",
+        "snapshot_excel": "input_snapshot/excel",
+        "snapshot_pdf": "input_snapshot/pdf_inbox",
+        "individual_output": "sorted_by_bo",
+        "merged_output": "merged",
     },
     "sanitize_filenames": True,
 }
@@ -90,8 +106,7 @@ def load_settings(base_dir: Path) -> Dict[str, Any]:
         try:
             with json_file.open("r", encoding="utf-8") as f:
                 data = json.load(f)
-            if isinstance(data.get("actions"), dict):
-                data["actions"].pop("move_pdfs", None)
+            normalize_legacy_settings(data)
             log("INFO", "Loaded settings.json")
             return deep_merge(DEFAULT_SETTINGS, data)
         except Exception as e:
@@ -103,8 +118,7 @@ def load_settings(base_dir: Path) -> Dict[str, Any]:
                 raw = f.read()
             stripped = strip_jsonc_comments(raw)
             data = json.loads(stripped)
-            if isinstance(data.get("actions"), dict):
-                data["actions"].pop("move_pdfs", None)
+            normalize_legacy_settings(data)
             log("INFO", "Loaded settings.jsonc")
             return deep_merge(DEFAULT_SETTINGS, data)
         except Exception as e:
@@ -125,6 +139,18 @@ def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]
     return result
 
 
+def normalize_legacy_settings(data: Dict[str, Any]) -> None:
+    """Translate legacy settings keys to the current schema."""
+    actions = data.get("actions")
+    if not isinstance(actions, dict):
+        return
+
+    if "merge" in actions and "merge_all" not in actions:
+        actions["merge_all"] = actions["merge"]
+
+    actions.pop("move_pdfs", None)
+
+
 # =========================
 # Utility Functions
 # =========================
@@ -138,6 +164,12 @@ def sanitize_filename(name: str) -> str:
     name = re.sub(INVALID_CHARS, "_", name)
     name = name.strip()
     return name
+
+
+def render_template(template: str, values: Dict[str, str], sanitize: bool) -> str:
+    """Render a configurable filename/folder template."""
+    rendered = template.format(**values)
+    return sanitize_filename(rendered) if sanitize else rendered.strip()
 
 
 def ensure_unique_path(path: Path) -> Path:
@@ -339,20 +371,24 @@ def process(base_dir: Path) -> None:
     log("INFO", f"Run started: {run_id}")
 
     settings = load_settings(base_dir)
+    actions = settings["actions"]
+    naming = settings["naming"]
+    paths_cfg = settings["paths"]
+    sanitize_names = settings["sanitize_filenames"]
 
-    input_excel = base_dir / "input" / "excel"
-    input_pdf = base_dir / "input" / "pdf_inbox"
+    input_excel = base_dir / Path(paths_cfg["excel_input"])
+    input_pdf = base_dir / Path(paths_cfg["pdf_input"])
 
-    runs_dir = base_dir / "runs"
+    runs_dir = base_dir / Path(paths_cfg["runs"])
     run_dir = runs_dir / run_id
 
-    snapshot_excel = run_dir / "input_snapshot" / "excel"
-    snapshot_pdf = run_dir / "input_snapshot" / "pdf_inbox"
+    snapshot_excel = run_dir / Path(paths_cfg["snapshot_excel"])
+    snapshot_pdf = run_dir / Path(paths_cfg["snapshot_pdf"])
 
-    sorted_dir = run_dir / "sorted_by_bo"
-    merged_dir = run_dir / "merged"
+    individual_dir = run_dir / Path(paths_cfg["individual_output"])
+    merged_dir = run_dir / Path(paths_cfg["merged_output"])
 
-    for p in [snapshot_excel, snapshot_pdf, sorted_dir, merged_dir]:
+    for p in [snapshot_excel, snapshot_pdf, individual_dir, merged_dir]:
         p.mkdir(parents=True, exist_ok=True)
 
     excel_files = [f for f in input_excel.iterdir() if f.suffix.lower() in (".xlsx", ".xlsm")]
@@ -401,25 +437,53 @@ def process(base_dir: Path) -> None:
 
         pdf_path = matches[0]
 
-        bo = sanitize_filename(rec["bo"]) if settings["sanitize_filenames"] else rec["bo"]
-        isin = sanitize_filename(rec["isin"]) if settings["sanitize_filenames"] else rec["isin"]
+        date_str = rec["date"].strftime(naming["date_format"])
+        template_values = {
+            "isin": str(rec["isin"]).strip(),
+            "bo": str(rec["bo"]).strip(),
+            "date": date_str,
+            "pdf_base": str(rec["pdf_base"]).strip(),
+        }
 
-        date_str = rec["date"].strftime(settings["naming"]["date_format"])
+        target_dir = individual_dir
+        if actions["sort_into_bo_folders"]:
+            folder_name = render_template(
+                naming["bo_folder_pattern"],
+                template_values,
+                sanitize_names,
+            )
+            target_dir = individual_dir / folder_name
 
-        target_dir = sorted_dir / bo
         target_dir.mkdir(parents=True, exist_ok=True)
 
-        target_name = f"{isin}_{date_str}.pdf"
+        if actions["rename_pdfs"]:
+            target_name = render_template(
+                naming["output_filename_pattern"],
+                template_values,
+                sanitize_names,
+            )
+            if not target_name.lower().endswith(".pdf"):
+                target_name += ".pdf"
+        else:
+            target_name = pdf_path.name
+
         target_path = ensure_unique_path(target_dir / target_name)
 
         try:
             source_path = snapshot_pdf / pdf_path.name
-            shutil.copy2(source_path, target_path)
+            if actions["create_outputs"]:
+                shutil.copy2(source_path, target_path)
 
-            log("INFO", f"Created {target_path}")
-            output_files.append(str(target_path))
+                log("INFO", f"Created {target_path}")
+                output_files.append(str(target_path))
+            else:
+                log("INFO", f"Matched {pdf_path.name} without individual output creation")
 
-            sorted_records.append((bo, rec["date"], isin, target_path))
+            merge_source = target_path if actions["create_outputs"] else source_path
+            sort_bo = template_values["bo"]
+            sort_isin = template_values["isin"]
+
+            sorted_records.append((sort_bo, rec["date"], sort_isin, merge_source))
             valid_records += 1
             consumed_pdf_files.add(pdf_path)
 
@@ -429,11 +493,11 @@ def process(base_dir: Path) -> None:
 
     merge_outputs: List[str] = []
 
-    if settings["actions"]["merge"] and sorted_records:
+    if actions["merge_all"] and sorted_records:
         sorted_records.sort(key=lambda x: (x[0].lower(), x[1], x[2].lower()))
 
         all_paths = [r[3] for r in sorted_records]
-        merged_file = merged_dir / "merged_all.pdf"
+        merged_file = merged_dir / naming["merged_all_filename"]
 
         fast_ok, merged_count = merge_pdfs_fast(all_paths, merged_file, defective_pdfs)
         if not fast_ok:
@@ -445,13 +509,21 @@ def process(base_dir: Path) -> None:
         else:
             log("WARNING", "Merged all PDFs skipped: no valid PDF content available")
 
-    if settings["actions"]["per_bo_merge"]:
+    if actions["per_bo_merge"]:
         per_bo: Dict[str, List[Path]] = defaultdict(list)
         for bo, _, _, p in sorted_records:
             per_bo[bo].append(p)
 
         for bo, paths in per_bo.items():
-            merged_file = merged_dir / f"merged_{bo}.pdf"
+            merged_name = render_template(
+                naming["merged_bo_filename_pattern"],
+                {"bo": bo},
+                sanitize_names,
+            )
+            if not merged_name.lower().endswith(".pdf"):
+                merged_name += ".pdf"
+
+            merged_file = merged_dir / merged_name
             fast_ok, merged_count = merge_pdfs_fast(paths, merged_file, defective_pdfs)
             if not fast_ok:
                 merged_count = merge_pdfs_fallback(paths, merged_file, defective_pdfs)
@@ -462,7 +534,7 @@ def process(base_dir: Path) -> None:
             else:
                 log("WARNING", f"Merged BO {bo} skipped: no valid PDF content available")
 
-    if settings["actions"]["cleanup_input"]:
+    if actions["cleanup_input"]:
         for f in consumed_excel_files:
             try:
                 f.unlink()
