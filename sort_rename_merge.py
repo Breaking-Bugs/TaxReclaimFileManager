@@ -216,6 +216,12 @@ def read_excel_files(
 ) -> Tuple[List[Dict[str, Any]], int]:
     """Read all Excel files and extract relevant rows."""
     columns = settings["columns"]
+    required_columns = {
+        columns["isin"],
+        columns["date"],
+        columns["bo"],
+        columns["pdf_base"],
+    }
 
     records: List[Dict[str, Any]] = []
     total_rows = 0
@@ -228,6 +234,15 @@ def read_excel_files(
             header = [str(c.value).strip() if c.value else "" for c in next(ws.iter_rows(min_row=1, max_row=1))[0:]]
 
             col_map = {name: idx for idx, name in enumerate(header)}
+            missing_columns = sorted(col for col in required_columns if col not in col_map)
+
+            if missing_columns:
+                log(
+                    "ERROR",
+                    f"Skipping Excel {excel_file.name}: missing required columns: {', '.join(missing_columns)}",
+                )
+                wb.close()
+                continue
 
             log("INFO", f"Processing Excel: {excel_file.name}")
 
