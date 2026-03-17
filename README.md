@@ -31,7 +31,7 @@ TaxReclaimFileManager/
   input/
     excel/
     pdf_inbox/
-  runs/
+  archive/
   settings.json
   sort_rename_merge.py
   run_sort_rename_merge.bat
@@ -41,14 +41,14 @@ TaxReclaimFileManager/
 
 1. Excel files are read from `input/excel`.
 2. PDFs are read from `input/pdf_inbox`.
-3. A timestamped run folder is created under `runs/`.
+3. A timestamped run folder is created under `archive/`.
 4. The input files are copied into a snapshot for auditability.
 5. Excel rows are matched to PDFs using the configured `pdf_base` column.
 6. Depending on `settings.json`, PDFs are copied, renamed, sorted, and merged.
 7. A `manifest.json` and `log.txt` are written into the run folder.
 8. A compact run summary is printed in the shell at the end.
 
-The script always works from the snapshot after the initial input copy. This keeps runs deterministic and audit-ready.
+The script always works from the snapshot after the initial input copy. This keeps archives deterministic and audit-ready.
 
 ## Run The Script
 
@@ -182,7 +182,7 @@ Controls where input and output folders live.
 "paths": {
   "excel_input": "input/excel",
   "pdf_input": "input/pdf_inbox",
-  "runs": "runs",
+  "archive": "archive",
   "snapshot_excel": "input_snapshot/excel",
   "snapshot_pdf": "input_snapshot/pdf_inbox",
   "individual_output": "sorted_by_bo",
@@ -199,7 +199,7 @@ If `true`, invalid Windows filename characters are replaced automatically.
 Each run creates a folder like:
 
 ```text
-runs/2026-03-14_15-35-26/
+archive/2026-03-14_15-35-26/
 ```
 
 Inside it you will typically find:

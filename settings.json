@@ -43,7 +43,7 @@
   "paths": {
     "excel_input": "input/excel",
     "pdf_input": "input/pdf_inbox",
-    "runs": "runs",
+    "archive": "archive",
     "snapshot_excel": "input_snapshot/excel",
     "snapshot_pdf": "input_snapshot/pdf_inbox",
     "individual_output": "sorted_by_bo",

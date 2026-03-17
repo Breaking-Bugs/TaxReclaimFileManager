@@ -88,7 +88,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "paths": {
         "excel_input": "input/excel",
         "pdf_input": "input/pdf_inbox",
-        "runs": "runs",
+        "archive": "archive",
         "snapshot_excel": "input_snapshot/excel",
         "snapshot_pdf": "input_snapshot/pdf_inbox",
         "individual_output": "sorted_by_bo",
@@ -522,8 +522,8 @@ def process(base_dir: Path) -> None:
     input_excel = base_dir / Path(paths_cfg["excel_input"])
     input_pdf = base_dir / Path(paths_cfg["pdf_input"])
 
-    runs_dir = base_dir / Path(paths_cfg["runs"])
-    run_dir = runs_dir / run_id
+    archive_dir = base_dir / Path(paths_cfg["archive"])
+    run_dir = archive_dir / run_id
 
     snapshot_excel = run_dir / Path(paths_cfg["snapshot_excel"])
     snapshot_pdf = run_dir / Path(paths_cfg["snapshot_pdf"])
