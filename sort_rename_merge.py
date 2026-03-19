@@ -186,7 +186,8 @@ def normalize_lookup_key(value: str) -> str:
     """Normalize BO names for lookup matching."""
     normalized = unicodedata.normalize("NFKD", str(value))
     normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
-    return normalized.strip().lower()
+    normalized = normalized.lower().strip()
+    return re.sub(r"\s+", "", normalized)
 
 
 def render_template(template: str, values: Dict[str, str], sanitize: bool) -> str:
@@ -356,19 +357,33 @@ def load_bo_lastname_lookup(
             first_name = row[4] if len(row) > 4 else None
             last_name = row[5] if len(row) > 5 else None
 
-            if not title or not first_name or not last_name:
-                continue
-
-            normalized_bo_name = normalize_lookup_key(f"{title}{first_name}{last_name}")
-            if not normalized_bo_name:
+            if not first_name or not last_name:
                 continue
 
             first_name_str = str(first_name).strip()
             last_name_str = str(last_name).strip()
-            lookup_map[normalized_bo_name] = {
+            lookup_value = {
                 "sort_key": build_lookup_bo_display_name(first_name_str, last_name_str),
                 "display_bo": build_lookup_bo_display_name(first_name_str, last_name_str),
             }
+
+            lookup_keys = [
+                normalize_lookup_key(f"{first_name_str} {last_name_str}"),
+                normalize_lookup_key(f"{first_name_str}{last_name_str}"),
+            ]
+
+            if title:
+                title_str = str(title).strip()
+                lookup_keys.extend(
+                    [
+                        normalize_lookup_key(f"{title_str} {first_name_str} {last_name_str}"),
+                        normalize_lookup_key(f"{title_str}{first_name_str}{last_name_str}"),
+                    ]
+                )
+
+            for lookup_key in lookup_keys:
+                if lookup_key:
+                    lookup_map[lookup_key] = lookup_value
     except Exception as e:
         log("WARNING", f"Failed reading BO lookup rows from {lookup_path}: {e}. Falling back to default sorting.")
         lookup_map = {}
