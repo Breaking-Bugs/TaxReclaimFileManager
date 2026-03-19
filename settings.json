@@ -20,6 +20,11 @@
     "case_insensitive": true
   },
 
+  "sorting": {
+    "mode": "default",
+    "bo_lookup_file": "input/bo_lookup.xlsx"
+  },
+
   "runtime": {
     "mode": "normal",
     "normal": {

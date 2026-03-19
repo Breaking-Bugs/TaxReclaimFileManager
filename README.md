@@ -7,6 +7,7 @@ It can:
 - match rows to PDFs using a request ID
 - create renamed PDF outputs
 - sort outputs into BO folders
+- optionally sort merged output order by BO last name via lookup Excel
 - merge all PDFs into one file
 - merge PDFs per BO
 - create a full run snapshot and manifest
@@ -45,8 +46,9 @@ TaxReclaimFileManager/
 4. The input files are copied into a snapshot for auditability.
 5. Excel rows are matched to PDFs using the configured `pdf_base` column.
 6. Depending on `settings.json`, PDFs are copied, renamed, sorted, and merged.
-7. A `manifest.json` and `log.txt` are written into the run folder.
-8. A compact run summary is printed in the shell at the end.
+7. If enabled, merged sorting order can use a BO last-name lookup instead of the raw `BO Name` value.
+8. A `manifest.json` and `log.txt` are written into the run folder.
+9. A compact run summary is printed in the shell at the end.
 
 The script always works from the snapshot after the initial input copy. This keeps archives deterministic and audit-ready.
 
@@ -126,6 +128,44 @@ Controls PDF matching behavior.
   "case_insensitive": true
 }
 ```
+
+### `sorting`
+
+Controls how records are ordered before `merge_all`.
+
+```json
+"sorting": {
+  "mode": "default",
+  "bo_lookup_file": "input/bo_lookup.xlsx"
+}
+```
+
+Modes:
+- `default`: current behavior, sort by the full `BO Name`
+- `lastname_lookup`: try to sort by BO last name using a lookup workbook
+
+Lookup file expectations:
+- the file is loaded once at startup only when `mode` is `lastname_lookup`
+- column D = BO Title
+- column E = BO First Name
+- column F = BO Last Name
+- the script concatenates D + E + F, normalizes the result, and matches it against normalized `BO Name`
+
+Normalization used for matching:
+- Unicode NFKD normalization
+- lowercase
+- trim surrounding whitespace
+- remove accents such as `é -> e`
+
+Fallback behavior:
+- if the lookup file is missing or cannot be read, the script logs a warning and keeps default sorting
+- if a lookup row is incomplete, that row is skipped
+- if a BO name is not found in the lookup, that record keeps the original `BO Name` sort order
+
+Important:
+- this setting only changes sort order for merged processing
+- BO folder names still use the original `BO Name`
+- output filenames, logs, and manifest content remain unchanged
 
 ### `runtime`
 

@@ -67,6 +67,10 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
         "strategies": ["exact"],
         "case_insensitive": True,
     },
+    "sorting": {
+        "mode": "default",
+        "bo_lookup_file": "input/bo_lookup.xlsx",
+    },
     "runtime": {
         "mode": "normal",
         "normal": {
@@ -176,6 +180,13 @@ def sanitize_filename(name: str) -> str:
     name = re.sub(INVALID_CHARS, "_", name)
     name = name.strip()
     return name
+
+
+def normalize_lookup_key(value: str) -> str:
+    """Normalize BO names for lookup matching."""
+    normalized = unicodedata.normalize("NFKD", str(value))
+    normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    return normalized.strip().lower()
 
 
 def render_template(template: str, values: Dict[str, str], sanitize: bool) -> str:
@@ -305,6 +316,55 @@ def parse_excel_date(value: Any) -> Optional[date]:
                 continue
 
     return None
+
+
+def load_bo_lastname_lookup(
+    base_dir: Path,
+    settings: Dict[str, Any],
+    runtime_options: Dict[str, Any],
+) -> Dict[str, str]:
+    """Load BO-name-to-last-name lookup when lastname sorting is enabled."""
+    sorting_cfg = settings.get("sorting", {})
+    lookup_path = base_dir / Path(sorting_cfg.get("bo_lookup_file", "input/bo_lookup.xlsx"))
+
+    if not lookup_path.exists():
+        log("WARNING", f"BO lookup file not found: {lookup_path}. Falling back to default sorting.")
+        return {}
+
+    try:
+        wb = run_with_retries(
+            f"Open BO lookup workbook {lookup_path.name}",
+            lambda path=lookup_path: load_workbook(path, read_only=True, data_only=True),
+            runtime_options,
+        )
+    except Exception as e:
+        log("WARNING", f"Failed to load BO lookup file {lookup_path}: {e}. Falling back to default sorting.")
+        return {}
+
+    lookup_map: Dict[str, str] = {}
+
+    try:
+        ws = wb.active
+        for row in ws.iter_rows(values_only=True):
+            title = row[3] if len(row) > 3 else None
+            first_name = row[4] if len(row) > 4 else None
+            last_name = row[5] if len(row) > 5 else None
+
+            if not title or not first_name or not last_name:
+                continue
+
+            normalized_bo_name = normalize_lookup_key(f"{title}{first_name}{last_name}")
+            if not normalized_bo_name:
+                continue
+
+            lookup_map[normalized_bo_name] = str(last_name).strip()
+    except Exception as e:
+        log("WARNING", f"Failed reading BO lookup rows from {lookup_path}: {e}. Falling back to default sorting.")
+        lookup_map = {}
+    finally:
+        wb.close()
+
+    return lookup_map
 
 
 # =========================
@@ -516,6 +576,13 @@ def process(base_dir: Path) -> None:
     paths_cfg = settings["paths"]
     sanitize_names = settings["sanitize_filenames"]
     runtime_options = get_runtime_options(settings)
+    sorting_cfg = settings.get("sorting", {})
+    sorting_mode = sorting_cfg.get("mode", "default")
+    bo_lastname_lookup = (
+        load_bo_lastname_lookup(base_dir, settings, runtime_options)
+        if sorting_mode == "lastname_lookup"
+        else {}
+    )
 
     log("INFO", f"Runtime mode: {runtime_options['mode']}")
 
@@ -565,6 +632,7 @@ def process(base_dir: Path) -> None:
     output_files: List[str] = []
     consumed_excel_files: set[Path] = set(excel_files)
     consumed_pdf_files: set[Path] = set()
+    merge_source_bo_map: Dict[Path, str] = {}
 
     sorted_records: List[Tuple[str, date, str, Path]] = []
 
@@ -635,10 +703,11 @@ def process(base_dir: Path) -> None:
                 log("INFO", f"Matched {pdf_path.name} without individual output creation")
 
             merge_source = target_path if actions["create_outputs"] else source_path
-            sort_bo = template_values["bo"]
+            sort_bo_key = bo_lastname_lookup.get(normalize_lookup_key(rec["bo"]), rec["bo"])
             sort_isin = template_values["isin"]
 
-            sorted_records.append((sort_bo, rec["date"], sort_isin, merge_source))
+            sorted_records.append((sort_bo_key, rec["date"], sort_isin, merge_source))
+            merge_source_bo_map[merge_source] = rec["bo"]
             valid_records += 1
             consumed_pdf_files.add(pdf_path)
 
@@ -666,8 +735,8 @@ def process(base_dir: Path) -> None:
 
     if actions["per_bo_merge"]:
         per_bo: Dict[str, List[Path]] = defaultdict(list)
-        for bo, _, _, p in sorted_records:
-            per_bo[bo].append(p)
+        for _, _, _, p in sorted_records:
+            per_bo[merge_source_bo_map.get(p, "UNKNOWN_BO")].append(p)
 
         for bo, paths in per_bo.items():
             merged_name = render_template(
