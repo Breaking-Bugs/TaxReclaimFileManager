@@ -190,6 +190,13 @@ def normalize_lookup_key(value: str) -> str:
     return re.sub(r"\s+", "", normalized)
 
 
+def normalize_display_name(value: str) -> str:
+    """Normalize display/path name parts to a stable accent-free form."""
+    normalized = unicodedata.normalize("NFKD", str(value))
+    normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    return normalized.strip()
+
+
 def render_template(template: str, values: Dict[str, str], sanitize: bool) -> str:
     """Render a configurable filename/folder template."""
     rendered = template.format(**values)
@@ -321,7 +328,10 @@ def parse_excel_date(value: Any) -> Optional[date]:
 
 def build_lookup_bo_display_name(first_name: str, last_name: str) -> str:
     """Build a stable BO display name for folder and per-BO merge naming."""
-    parts = [str(last_name).strip(), str(first_name).strip()]
+    parts = [
+        normalize_display_name(last_name),
+        normalize_display_name(first_name),
+    ]
     return "_".join(part for part in parts if part)
 
 
