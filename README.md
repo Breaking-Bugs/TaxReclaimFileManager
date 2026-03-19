@@ -131,7 +131,7 @@ Controls PDF matching behavior.
 
 ### `sorting`
 
-Controls how records are ordered before `merge_all`.
+Controls how records are ordered and named in BO-based outputs when lookup sorting is enabled.
 
 ```json
 "sorting": {
@@ -150,6 +150,7 @@ Lookup file expectations:
 - column E = BO First Name
 - column F = BO Last Name
 - the script concatenates D + E + F, normalizes the result, and matches it against normalized `BO Name`
+- when matched, BO-based folder and per-BO merged names are generated as `lastname_firstname`
 
 Normalization used for matching:
 - Unicode NFKD normalization
@@ -163,9 +164,9 @@ Fallback behavior:
 - if a BO name is not found in the lookup, that record keeps the original `BO Name` sort order
 
 Important:
-- this setting only changes sort order for merged processing
-- BO folder names still use the original `BO Name`
-- output filenames, logs, and manifest content remain unchanged
+- `merged_all.pdf` keeps the same filename, but its internal merge order follows lookup-based BO sorting
+- BO folder names and per-BO merged filenames use the lookup-based `lastname_firstname` form when a match is found
+- individual output PDF filenames, logs, and manifest content remain unchanged
 
 ### `runtime`
 
@@ -265,6 +266,7 @@ The manifest contains:
 - unprocessed inbox PDFs
 - created output files
 - created merged files
+- `merged_all_sequence` with the exact BO/file order used for `merged_all.pdf`
 - effective settings
 
 ## Shell Summary

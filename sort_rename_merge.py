@@ -318,12 +318,18 @@ def parse_excel_date(value: Any) -> Optional[date]:
     return None
 
 
+def build_lookup_bo_display_name(first_name: str, last_name: str) -> str:
+    """Build a stable BO display name for folder and per-BO merge naming."""
+    parts = [str(last_name).strip(), str(first_name).strip()]
+    return "_".join(part for part in parts if part)
+
+
 def load_bo_lastname_lookup(
     base_dir: Path,
     settings: Dict[str, Any],
     runtime_options: Dict[str, Any],
-) -> Dict[str, str]:
-    """Load BO-name-to-last-name lookup when lastname sorting is enabled."""
+) -> Dict[str, Dict[str, str]]:
+    """Load BO lookup data when lastname sorting is enabled."""
     sorting_cfg = settings.get("sorting", {})
     lookup_path = base_dir / Path(sorting_cfg.get("bo_lookup_file", "input/bo_lookup.xlsx"))
 
@@ -341,7 +347,7 @@ def load_bo_lastname_lookup(
         log("WARNING", f"Failed to load BO lookup file {lookup_path}: {e}. Falling back to default sorting.")
         return {}
 
-    lookup_map: Dict[str, str] = {}
+    lookup_map: Dict[str, Dict[str, str]] = {}
 
     try:
         ws = wb.active
@@ -357,7 +363,12 @@ def load_bo_lastname_lookup(
             if not normalized_bo_name:
                 continue
 
-            lookup_map[normalized_bo_name] = str(last_name).strip()
+            first_name_str = str(first_name).strip()
+            last_name_str = str(last_name).strip()
+            lookup_map[normalized_bo_name] = {
+                "sort_key": build_lookup_bo_display_name(first_name_str, last_name_str),
+                "display_bo": build_lookup_bo_display_name(first_name_str, last_name_str),
+            }
     except Exception as e:
         log("WARNING", f"Failed reading BO lookup rows from {lookup_path}: {e}. Falling back to default sorting.")
         lookup_map = {}
@@ -365,6 +376,19 @@ def load_bo_lastname_lookup(
         wb.close()
 
     return lookup_map
+
+
+def resolve_bo_sorting_values(
+    bo_name: str,
+    bo_lookup_entry: Optional[Dict[str, str]],
+) -> Tuple[str, str]:
+    """Resolve sort key and BO display name for the current sorting mode."""
+    if not bo_lookup_entry:
+        return bo_name, bo_name
+
+    sort_key = bo_lookup_entry.get("sort_key", "").strip() or bo_name
+    display_bo = bo_lookup_entry.get("display_bo", "").strip() or bo_name
+    return sort_key, display_bo
 
 
 # =========================
@@ -578,7 +602,7 @@ def process(base_dir: Path) -> None:
     runtime_options = get_runtime_options(settings)
     sorting_cfg = settings.get("sorting", {})
     sorting_mode = sorting_cfg.get("mode", "default")
-    bo_lastname_lookup = (
+    bo_lookup_data = (
         load_bo_lastname_lookup(base_dir, settings, runtime_options)
         if sorting_mode == "lastname_lookup"
         else {}
@@ -633,6 +657,7 @@ def process(base_dir: Path) -> None:
     consumed_excel_files: set[Path] = set(excel_files)
     consumed_pdf_files: set[Path] = set()
     merge_source_bo_map: Dict[Path, str] = {}
+    merged_all_sequence: List[Dict[str, Any]] = []
 
     sorted_records: List[Tuple[str, date, str, Path]] = []
 
@@ -657,6 +682,8 @@ def process(base_dir: Path) -> None:
         pdf_path = matches[0]
 
         date_str = rec["date"].strftime(naming["date_format"])
+        bo_lookup_entry = bo_lookup_data.get(normalize_lookup_key(rec["bo"]))
+        sort_bo_key, display_bo = resolve_bo_sorting_values(rec["bo"], bo_lookup_entry)
         template_values = {
             "isin": str(rec["isin"]).strip(),
             "bo": str(rec["bo"]).strip(),
@@ -668,7 +695,7 @@ def process(base_dir: Path) -> None:
         if actions["sort_into_bo_folders"]:
             folder_name = render_template(
                 naming["bo_folder_pattern"],
-                template_values,
+                {**template_values, "bo": display_bo},
                 sanitize_names,
             )
             target_dir = individual_dir / folder_name
@@ -703,11 +730,10 @@ def process(base_dir: Path) -> None:
                 log("INFO", f"Matched {pdf_path.name} without individual output creation")
 
             merge_source = target_path if actions["create_outputs"] else source_path
-            sort_bo_key = bo_lastname_lookup.get(normalize_lookup_key(rec["bo"]), rec["bo"])
             sort_isin = template_values["isin"]
 
             sorted_records.append((sort_bo_key, rec["date"], sort_isin, merge_source))
-            merge_source_bo_map[merge_source] = rec["bo"]
+            merge_source_bo_map[merge_source] = display_bo
             valid_records += 1
             consumed_pdf_files.add(pdf_path)
 
@@ -719,6 +745,17 @@ def process(base_dir: Path) -> None:
 
     if actions["merge_all"] and sorted_records:
         sorted_records.sort(key=lambda x: (x[0].lower(), x[1], x[2].lower()))
+        merged_all_sequence = [
+            {
+                "position": index,
+                "bo": merge_source_bo_map.get(record[3], "UNKNOWN_BO"),
+                "sort_key": record[0],
+                "date": record[1].isoformat(),
+                "isin": record[2],
+                "source_pdf": str(record[3]),
+            }
+            for index, record in enumerate(sorted_records, start=1)
+        ]
 
         all_paths = [r[3] for r in sorted_records]
         merged_file = merged_dir / naming["merged_all_filename"]
@@ -814,6 +851,7 @@ def process(base_dir: Path) -> None:
         "unprocessed_input_pdfs": unprocessed_input_pdfs,
         "output_files": output_files,
         "merge_outputs": merge_outputs,
+        "merged_all_sequence": merged_all_sequence,
         "settings": settings,
     }
 
