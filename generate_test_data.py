@@ -5,6 +5,7 @@ from openpyxl import Workbook
 BASE = Path(__file__).parent
 excel_dir = BASE / "input" / "excel"
 pdf_dir = BASE / "input" / "pdf_inbox"
+bo_lookup_file = BASE / "input" / "bo_lookup.xlsx"
 
 excel_dir.mkdir(parents=True, exist_ok=True)
 pdf_dir.mkdir(parents=True, exist_ok=True)
@@ -22,12 +23,12 @@ SECURITIES = [
 ]
 
 BENEFICIAL_OWNERS = [
-    "BlackRock Institutional",
-    "UBS Asset Management",
-    "Allianz Global Investors",
-    "Vanguard Group",
-    "State Street Global Advisors",
-    "Norges Bank Investment Management"
+    ("Mr", "Marko", "Veselcic"),
+    ("Ms", "Anna", "Schneider"),
+    ("Mr", "Lukas", "Mayer"),
+    ("Ms", "Sophie", "Dubois"),
+    ("Mr", "Thomas", "Mueller"),
+    ("Ms", "Elena", "Rossi"),
 ]
 
 
@@ -106,10 +107,13 @@ def create_visible_pdf(path, request_id, isin, bo, payment_date, company):
 
 
 rows = []
+used_beneficial_owners = set()
 
 for i in range(30):
     isin, company, payment_date = random.choice(SECURITIES)
-    bo = random.choice(BENEFICIAL_OWNERS)
+    bo_title, bo_first_name, bo_last_name = random.choice(BENEFICIAL_OWNERS)
+    bo = f"{bo_first_name} {bo_last_name}"
+    used_beneficial_owners.add((bo_title, bo_first_name, bo_last_name))
 
     request_id = f"REQ{i+1:05d}"
 
@@ -149,6 +153,16 @@ for r in rows:
 excel_file = excel_dir / "realistic_test_data.xlsx"
 wb.save(excel_file)
 
+lookup_wb = Workbook()
+lookup_ws = lookup_wb.active
+lookup_ws.append(["ID", "Region", "Desk", "BO Title", "BO First Name", "BO Last Name"])
+
+for index, (title, first_name, last_name) in enumerate(sorted(used_beneficial_owners), start=1):
+    lookup_ws.append([index, "TEST", "OPS", title, first_name, last_name])
+
+lookup_wb.save(bo_lookup_file)
+
 print("Test dataset generated")
 print("Excel:", excel_file)
+print("BO lookup:", bo_lookup_file)
 print("PDFs:", pdf_dir)

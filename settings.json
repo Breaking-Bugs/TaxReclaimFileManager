@@ -21,7 +21,7 @@
   },
 
   "sorting": {
-    "mode": "default",
+    "mode": "lastname_lookup",
     "bo_lookup_file": "input/bo_lookup.xlsx"
   },
 
